@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
 
 # ===================================================================================
-#   SIMULADOR WEB (VERSÃO 18.1 - ADAPTAÇÃO PARA PLANILHA REAL)
+#   SIMULADOR WEB (VERSÃO 18.2 - DIAGNÓSTICO AVANÇADO DE EXCEL)
 #
-#   - Adaptado para ler os nomes de colunas específicos da sua planilha.
-#   - Une as colunas 'Data' e 'Hora' em uma única coluna 'timestamp'.
+#   - Adiciona mensagens de log detalhadas para depurar a leitura do arquivo Excel.
 # ===================================================================================
 
 import os
 import traceback
+import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template, request
 import pandas as pd
-import threading
-import time
 
 app = Flask(__name__)
 
@@ -27,59 +25,68 @@ current_index = 0
 # --- FUNÇÕES DE MANIPULAÇÃO DE DADOS ---
 
 def carregar_dados_do_excel():
-    """Carrega a planilha Excel específica do usuário para um DataFrame do Pandas."""
+    """Carrega a planilha Excel específica do usuário com mensagens de diagnóstico."""
     global dados_excel
     try:
         if os.path.exists(DATA_FILE):
-            print(f"Carregando dados do arquivo {DATA_FILE}...")
+            print("--- INICIANDO CARREGAMENTO DO EXCEL ---")
+            print(f"Tentando ler o arquivo: {DATA_FILE}")
             
             # 1. Lê o arquivo Excel.
             df = pd.read_excel(DATA_FILE)
+            print(">>> Passo 1/5: Arquivo Excel lido com sucesso.")
+            
+            # LINHA DE DIAGNÓSTICO MAIS IMPORTANTE:
+            print(">>> Colunas encontradas na planilha:", df.columns.tolist())
 
-            # 2. Une as colunas 'Data' e 'Hora' em uma única coluna 'timestamp'.
-            # O Pandas é inteligente para entender os formatos mais comuns de data e hora.
+            # 2. Une as colunas 'Data' e 'Hora'
+            print(">>> Passo 2/5: Tentando unir colunas 'Data' e 'Hora'...")
             df['timestamp'] = pd.to_datetime(df['Data'].astype(str) + ' ' + df['Hora'].astype(str))
+            print(">>> Colunas de data e hora unidas com sucesso.")
 
-            # 3. Renomeia as colunas da sua planilha para os nomes padrão que o resto do programa espera.
+            # 3. Renomeia as colunas
+            print(">>> Passo 3/5: Tentando renomear colunas...")
             df = df.rename(columns={
                 'Sensor_Chuva (mm)': 'chuva',
                 'Sensor_Umidade (%)': 'umidade'
             })
+            print(">>> Colunas renomeadas com sucesso.")
             
-            # Adiciona a coluna 'temperatura' com dados simulados, já que ela não existe na sua planilha.
-            # Se você adicionar essa coluna no seu Excel, o programa a usará.
+            # Adiciona a coluna 'temperatura' se não existir
             if 'temperatura' not in df.columns:
+                print(">>> Adicionando coluna 'temperatura' simulada...")
                 df['temperatura'] = [round(random.uniform(18.0, 30.0), 2) for _ in range(len(df))]
 
-            # 4. Seleciona apenas as colunas que vamos usar, na ordem correta.
+            # 4. Seleciona e ordena as colunas finais
+            print(">>> Passo 4/5: Selecionando e ordenando dados...")
             df = df[['timestamp', 'umidade', 'temperatura', 'chuva']]
-            
-            # 5. Ordena os dados por data para garantir a sequência correta.
             df = df.sort_values(by='timestamp').reset_index(drop=True)
             
             dados_excel = df
-            print(f"Sucesso! {len(dados_excel)} registros carregados e processados.")
+            print(f">>> Passo 5/5: SUCESSO! {len(dados_excel)} registros carregados.")
+            print("--- FIM DO CARREGAMENTO DO EXCEL ---")
         else:
-            print(f"AVISO: Arquivo '{DATA_FILE}' não encontrado.")
+            print(f"AVISO: Arquivo '{DATA_FILE}' não encontrado. O dashboard ficará vazio.")
             dados_excel = pd.DataFrame(columns=['timestamp', 'umidade', 'temperatura', 'chuva'])
-    except Exception:
-        print(f"FALHA CRÍTICA AO LER O ARQUIVO EXCEL: {traceback.format_exc()}")
+    except Exception as e:
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(f"!!!!!!!!!!! FALHA CRÍTICA AO LER O ARQUIVO EXCEL !!!!!!!!!!!")
+        print(f"!!!!!!!!!!! O ERRO FOI: {e}")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(traceback.format_exc())
+        # Mantém um DataFrame vazio para não travar o resto da aplicação
+        dados_excel = pd.DataFrame(columns=['timestamp', 'umidade', 'temperatura', 'chuva'])
 
-
-# --- ROTAS DA APLICAÇÃO (sem alterações) ---
+# --- ROTAS (sem alterações) ---
+# ... (O restante do seu arquivo Python continua aqui, sem nenhuma alteração) ...
 @app.route('/')
 def pagina_de_acesso(): return render_template('index.html')
-
 @app.route('/mapa', methods=['GET', 'POST'])
 def pagina_mapa(): return render_template('mapa.html')
-
 @app.route('/dashboard')
 def pagina_dashboard():
     device_id = request.args.get('device_id', 'SN-A7B4')
     return render_template('dashboard.html', device_id=device_id)
-
-# --- ROTAS DE API (sem alterações) ---
-
 @app.route('/api/dados')
 def api_dados():
     try:
@@ -92,9 +99,7 @@ def api_dados():
             df_filtrado = df.tail(30)
         dados_formatados = df_filtrado.apply(lambda row: { "timestamp_completo": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%H:%M:%S'), "umidade": row['umidade'], "temperatura": row['temperatura'], "chuva": row['chuva'] }, axis=1).tolist()
         return jsonify(dados_formatados)
-    except Exception:
-        print(f"Erro na rota /api/dados: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
-
+    except Exception: print(f"Erro na rota /api/dados: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 @app.route('/api/dados_atuais')
 def api_dados_atuais():
     global current_index
@@ -104,9 +109,7 @@ def api_dados_atuais():
         current_index = (current_index + 1) % len(dados_excel)
         leitura_formatada = { "timestamp_completo": leitura_atual['timestamp'].astimezone(TZ_BRASILIA).strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": leitura_atual['timestamp'].astimezone(TZ_BRASILIA).strftime('%H:%M:%S'), "umidade": leitura_atual['umidade'], "temperatura": leitura_atual['temperatura'], "chuva": leitura_atual['chuva'] }
         return jsonify(leitura_formatada)
-    except Exception:
-        print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
-
+    except Exception: print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 @app.route('/api/meses_disponiveis')
 def api_meses_disponiveis():
     try:
@@ -114,8 +117,5 @@ def api_meses_disponiveis():
         meses = dados_excel['timestamp'].dt.strftime('%Y-%m').unique().tolist()
         meses.sort(reverse=True)
         return jsonify(meses)
-    except Exception:
-        print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
-        
-# --- INICIALIZAÇÃO ---
+    except Exception: print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 carregar_dados_do_excel()
