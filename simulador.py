@@ -1,15 +1,6 @@
 # -*- coding: utf-8 -*-
-
-# ===================================================================================
-#   SIMULADOR WEB (VERSÃO 14.2 - ATUALIZAÇÃO EM TEMPO REAL SIMPLIFICADA)
-#
-#   - Simplifica a rota /api/dados_atuais para evitar falhas de banco de dados.
-#   - A rota agora apenas gera e retorna dados, sem salvá-los, garantindo a performance.
-# ===================================================================================
-
-import os
-import random
-import traceback
+# VERSÃO 17.3 - Garante que a API de Status está presente e funcional
+import os, random, traceback
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template, request
@@ -18,12 +9,10 @@ from sqlalchemy import create_engine, text, inspect
 
 app = Flask(__name__)
 
-# --- CONFIGURAÇÃO ---
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
-# --- FUNÇÕES DE MANIPULAÇÃO DE DADOS ---
 def gerar_leitura_baseada_no_tempo(timestamp):
     minuto = timestamp.minute; umidade, temperatura, chuva = 0, 0, 0
     if 0 <= minuto < 20: umidade = 35.0 - (minuto * 0.75); temperatura = 25.0 + (minuto * 0.2); chuva = 0.0
@@ -32,19 +21,20 @@ def gerar_leitura_baseada_no_tempo(timestamp):
     umidade += random.uniform(-1.5, 1.5); temperatura += random.uniform(-1.0, 1.0)
     return { "timestamp": timestamp, "umidade": round(max(10, min(70, umidade)), 2), "temperatura": round(temperatura, 2), "chuva": round(chuva, 2) }
 
-def ensure_table_exists(connection):
-    inspector = inspect(connection)
-    if not inspector.has_table('leituras'):
-        print("Tabela 'leituras' não encontrada. Criando e populando...")
-        connection.execute(text("""CREATE TABLE leituras (id SERIAL PRIMARY KEY, timestamp TIMESTAMPTZ NOT NULL, umidade FLOAT NOT NULL, temperatura FLOAT NOT NULL, chuva FLOAT NOT NULL);"""))
-        hora_atual = datetime.now(TZ_BRASILIA); total_horas = 30 * 24; dados = []
+def create_initial_data_file(connection):
+    try:
+        print("Criando tabela com dados históricos..."); hora_atual = datetime.now(TZ_BRASILIA); total_horas = 30 * 24; dados = []
         for i in range(total_horas):
             leitura = gerar_leitura_baseada_no_tempo(hora_atual - timedelta(hours=i))
             dados.append(f"('{leitura['timestamp']}', {leitura['umidade']}, {leitura['temperatura']}, {leitura['chuva']})")
         dados.reverse(); values_sql = ", ".join(dados)
-        connection.execute(text(f"INSERT INTO leituras (timestamp, umidade, temperatura, chuva) VALUES {values_sql};"))
-        connection.commit()
-        print("Tabela 'leituras' criada e populada.")
+        connection.execute(text("""CREATE TABLE leituras (id SERIAL PRIMARY KEY, timestamp TIMESTAMPTZ NOT NULL, umidade FLOAT NOT NULL, temperatura FLOAT NOT NULL, chuva FLOAT NOT NULL);"""))
+        connection.execute(text(f"INSERT INTO leituras (timestamp, umidade, temperatura, chuva) VALUES {values_sql};")); connection.commit()
+    except Exception: print(f"FALHA CRÍTICA AO CRIAR TABELA: {traceback.format_exc()}")
+
+def ensure_table_exists(connection):
+    inspector = inspect(connection)
+    if not inspector.has_table('leituras'): create_initial_data_file(connection)
 
 def ler_dados_do_db():
     try:
@@ -53,7 +43,11 @@ def ler_dados_do_db():
             return pd.read_sql_table('leituras', connection, parse_dates=['timestamp'])
     except Exception: print(f"Erro ao ler do banco de dados: {traceback.format_exc()}"); return pd.DataFrame()
 
-# --- ROTAS DA APLICAÇÃO ---
+def salvar_nova_leitura_no_db(leitura):
+    with engine.connect() as connection:
+        ensure_table_exists(connection)
+        query = text("INSERT INTO leituras (timestamp, umidade, temperatura, chuva) VALUES (:ts, :u, :t, :c)"); connection.execute(query, {"ts": leitura['timestamp'], "u": leitura['umidade'], "t": leitura['temperatura'], "c": leitura['chuva']}); connection.commit()
+
 @app.route('/')
 def pagina_de_acesso(): return render_template('index.html')
 
@@ -65,50 +59,42 @@ def pagina_dashboard():
     device_id = request.args.get('device_id', 'SN-A7B4')
     return render_template('dashboard.html', device_id=device_id)
 
-# --- ROTAS DE API ---
 @app.route('/api/dados')
 def api_dados():
     try:
-        df = ler_dados_do_db()
+        df = ler_dados_do_db();
         if df.empty: return jsonify([])
         mes_selecionado = request.args.get('month')
-        if mes_selecionado:
-            df_filtrado = df[df['timestamp'].dt.strftime('%Y-%m') == mes_selecionado]
-        else:
-            df_filtrado = df.tail(30)
+        if mes_selecionado: df_filtrado = df[df['timestamp'].dt.strftime('%Y-%m') == mes_selecionado]
+        else: df_filtrado = df.tail(30)
         dados_formatados = df_filtrado.apply(lambda row: { "timestamp_completo": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%H:%M:%S'), "umidade": row['umidade'], "temperatura": row['temperatura'], "chuva": row['chuva'] }, axis=1).tolist()
         return jsonify(dados_formatados)
     except Exception: print(f"Erro na rota /api/dados: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 
-# =======================================================================
-# ALTERAÇÃO FINAL E DEFINITIVA
-# Esta rota agora apenas GERA e RETORNA os dados, sem salvar no banco.
-# =======================================================================
 @app.route('/api/dados_atuais')
 def api_dados_atuais():
     try:
-        # Apenas gera um novo dado e o formata para o frontend.
         nova_leitura = gerar_leitura_baseada_no_tempo(datetime.now(TZ_BRASILIA))
-        leitura_formatada = {
-            "timestamp_completo": nova_leitura['timestamp'].strftime('%d/%m/%Y %H:%M:%S'),
-            "timestamp_grafico": nova_leitura['timestamp'].strftime('%H:%M:%S'),
-            "umidade": nova_leitura['umidade'],
-            "temperatura": nova_leitura['temperatura'],
-            "chuva": nova_leitura['chuva']
-        }
+        salvar_nova_leitura_no_db(nova_leitura)
+        leitura_formatada = { "timestamp_completo": nova_leitura['timestamp'].strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": nova_leitura['timestamp'].strftime('%H:%M:%S'), "umidade": nova_leitura['umidade'], "temperatura": nova_leitura['temperatura'], "chuva": nova_leitura['chuva'] }
         return jsonify(leitura_formatada)
-    except Exception:
-        print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}")
-        return jsonify({"error": "Erro interno ao gerar novo dado"}), 500
+    except Exception: print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 
 @app.route('/api/meses_disponiveis')
 def api_meses_disponiveis():
     try:
-        with engine.connect() as connection:
-            ensure_table_exists(connection)
-            query = text("SELECT DISTINCT to_char(timestamp, 'YYYY-MM') as mes FROM leituras ORDER BY mes DESC")
-            result = connection.execute(query).mappings().all()
-            meses = [row['mes'] for row in result]
-            return jsonify(meses)
+        df = ler_dados_do_db()
+        if df.empty: return jsonify([])
+        meses = df['timestamp'].dt.strftime('%Y-%m').unique().tolist()
+        meses.reverse()
+        return jsonify(meses)
+    except Exception: print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
+
+@app.route('/api/status_sensores')
+def api_status_sensores():
+    try:
+        leitura_atual = gerar_leitura_baseada_no_tempo(datetime.now(TZ_BRASILIA))
+        status = { "umidade": leitura_atual['umidade'], "chuva": leitura_atual['chuva'] }
+        return jsonify(status)
     except Exception:
-        print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
+        print(f"Erro na rota /api/status_sensores: {traceback.format_exc()}"); return jsonify({"error": "Erro interno ao buscar status"}), 500
