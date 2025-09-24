@@ -1,74 +1,59 @@
-# -*- coding: utf--8 -*-
+# -*- coding: utf-8 -*-
 
 # ===================================================================================
-#   SIMULADOR WEB (VERSÃO 18.3 - CORREÇÃO FINAL DE FUSO HORÁRIO DO EXCEL)
+#   SIMULADOR WEB (VERSÃO 14.2 - ATUALIZAÇÃO EM TEMPO REAL SIMPLIFICADA)
 #
-#   - Garante que as datas lidas do Excel sejam corretamente tratadas com fuso horário.
+#   - Simplifica a rota /api/dados_atuais para evitar falhas de banco de dados.
+#   - A rota agora apenas gera e retorna dados, sem salvá-los, garantindo a performance.
 # ===================================================================================
 
 import os
-import traceback
 import random
-from datetime import datetime
+import traceback
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template, request
 import pandas as pd
+from sqlalchemy import create_engine, text, inspect
 
 app = Flask(__name__)
 
 # --- CONFIGURAÇÃO ---
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
-DATA_FILE = "dados_sensores.xlsx"
-dados_excel = pd.DataFrame()
-current_index = 0
+DATABASE_URL = os.environ.get("DATABASE_URL")
+engine = create_engine(DATABASE_URL)
 
 # --- FUNÇÕES DE MANIPULAÇÃO DE DADOS ---
+def gerar_leitura_baseada_no_tempo(timestamp):
+    minuto = timestamp.minute; umidade, temperatura, chuva = 0, 0, 0
+    if 0 <= minuto < 20: umidade = 35.0 - (minuto * 0.75); temperatura = 25.0 + (minuto * 0.2); chuva = 0.0
+    elif 20 <= minuto < 40: umidade = 20.0 + ((minuto - 20) * 2.0); temperatura = 29.0 - ((minuto - 20) * 0.3); chuva = random.uniform(5.0, 25.0)
+    else: umidade = 60.0 - ((minuto - 40) * 1.0); temperatura = 23.0 + ((minuto - 40) * 0.1); chuva = 0.0
+    umidade += random.uniform(-1.5, 1.5); temperatura += random.uniform(-1.0, 1.0)
+    return { "timestamp": timestamp, "umidade": round(max(10, min(70, umidade)), 2), "temperatura": round(temperatura, 2), "chuva": round(chuva, 2) }
 
-def carregar_dados_do_excel():
-    """Carrega a planilha Excel e trata corretamente o fuso horário."""
-    global dados_excel
+def ensure_table_exists(connection):
+    inspector = inspect(connection)
+    if not inspector.has_table('leituras'):
+        print("Tabela 'leituras' não encontrada. Criando e populando...")
+        connection.execute(text("""CREATE TABLE leituras (id SERIAL PRIMARY KEY, timestamp TIMESTAMPTZ NOT NULL, umidade FLOAT NOT NULL, temperatura FLOAT NOT NULL, chuva FLOAT NOT NULL);"""))
+        hora_atual = datetime.now(TZ_BRASILIA); total_horas = 30 * 24; dados = []
+        for i in range(total_horas):
+            leitura = gerar_leitura_baseada_no_tempo(hora_atual - timedelta(hours=i))
+            dados.append(f"('{leitura['timestamp']}', {leitura['umidade']}, {leitura['temperatura']}, {leitura['chuva']})")
+        dados.reverse(); values_sql = ", ".join(dados)
+        connection.execute(text(f"INSERT INTO leituras (timestamp, umidade, temperatura, chuva) VALUES {values_sql};"))
+        connection.commit()
+        print("Tabela 'leituras' criada e populada.")
+
+def ler_dados_do_db():
     try:
-        if os.path.exists(DATA_FILE):
-            print("--- INICIANDO CARREGAMENTO DO EXCEL ---")
-            df = pd.read_excel(DATA_FILE)
-            print(">>> Colunas encontradas:", df.columns.tolist())
+        with engine.connect() as connection:
+            ensure_table_exists(connection)
+            return pd.read_sql_table('leituras', connection, parse_dates=['timestamp'])
+    except Exception: print(f"Erro ao ler do banco de dados: {traceback.format_exc()}"); return pd.DataFrame()
 
-            # Une as colunas 'Data' e 'Hora'
-            df['timestamp'] = pd.to_datetime(df['Data'].astype(str) + ' ' + df['Hora'].astype(str))
-            
-            # =======================================================================
-            # CORREÇÃO CRÍTICA AQUI:
-            # Informamos ao Pandas que as datas da planilha representam o horário de Brasília.
-            # Isso evita erros de fuso horário nas APIs.
-            # =======================================================================
-            df['timestamp'] = df['timestamp'].dt.tz_localize(TZ_BRASILIA)
-
-            df = df.rename(columns={
-                'Sensor_Chuva (mm)': 'chuva',
-                'Sensor_Umidade (%)': 'umidade'
-            })
-            
-            if 'temperatura' not in df.columns:
-                df['temperatura'] = [round(random.uniform(18.0, 30.0), 2) for _ in range(len(df))]
-
-            df = df[['timestamp', 'umidade', 'temperatura', 'chuva']]
-            df = df.sort_values(by='timestamp').reset_index(drop=True)
-            
-            dados_excel = df
-            print(f">>> SUCESSO! {len(dados_excel)} registros carregados.")
-            print("--- FIM DO CARREGAMENTO DO EXCEL ---")
-        else:
-            print(f"AVISO: Arquivo '{DATA_FILE}' não encontrado.")
-            dados_excel = pd.DataFrame(columns=['timestamp', 'umidade', 'temperatura', 'chuva'])
-    except Exception as e:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(f"!!!!!!!!!!! FALHA CRÍTICA AO LER O ARQUIVO EXCEL !!!!!!!!!!!")
-        print(f"!!!!!!!!!!! O ERRO FOI: {e}")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(traceback.format_exc())
-        dados_excel = pd.DataFrame(columns=['timestamp', 'umidade', 'temperatura', 'chuva'])
-
-# --- ROTAS (sem alterações) ---
+# --- ROTAS DA APLICAÇÃO ---
 @app.route('/')
 def pagina_de_acesso(): return render_template('index.html')
 
@@ -80,41 +65,50 @@ def pagina_dashboard():
     device_id = request.args.get('device_id', 'SN-A7B4')
     return render_template('dashboard.html', device_id=device_id)
 
-# --- ROTAS DE API (sem alterações) ---
+# --- ROTAS DE API ---
 @app.route('/api/dados')
 def api_dados():
     try:
-        if dados_excel.empty: return jsonify([])
+        df = ler_dados_do_db()
+        if df.empty: return jsonify([])
         mes_selecionado = request.args.get('month')
-        df = dados_excel.copy()
         if mes_selecionado:
             df_filtrado = df[df['timestamp'].dt.strftime('%Y-%m') == mes_selecionado]
         else:
             df_filtrado = df.tail(30)
-        dados_formatados = df_filtrado.apply(lambda row: { "timestamp_completo": row['timestamp'].strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": row['timestamp'].strftime('%H:%M:%S'), "umidade": row['umidade'], "temperatura": row['temperatura'], "chuva": row['chuva'] }, axis=1).tolist()
+        dados_formatados = df_filtrado.apply(lambda row: { "timestamp_completo": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%H:%M:%S'), "umidade": row['umidade'], "temperatura": row['temperatura'], "chuva": row['chuva'] }, axis=1).tolist()
         return jsonify(dados_formatados)
     except Exception: print(f"Erro na rota /api/dados: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 
+# =======================================================================
+# ALTERAÇÃO FINAL E DEFINITIVA
+# Esta rota agora apenas GERA e RETORNA os dados, sem salvar no banco.
+# =======================================================================
 @app.route('/api/dados_atuais')
 def api_dados_atuais():
-    global current_index
     try:
-        if dados_excel.empty: return jsonify({"error": "Nenhum dado carregado"}), 404
-        leitura_atual = dados_excel.iloc[current_index]
-        current_index = (current_index + 1) % len(dados_excel)
-        leitura_formatada = { "timestamp_completo": leitura_atual['timestamp'].strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": leitura_atual['timestamp'].strftime('%H:%M:%S'), "umidade": leitura_atual['umidade'], "temperatura": leitura_atual['temperatura'], "chuva": leitura_atual['chuva'] }
+        # Apenas gera um novo dado e o formata para o frontend.
+        nova_leitura = gerar_leitura_baseada_no_tempo(datetime.now(TZ_BRASILIA))
+        leitura_formatada = {
+            "timestamp_completo": nova_leitura['timestamp'].strftime('%d/%m/%Y %H:%M:%S'),
+            "timestamp_grafico": nova_leitura['timestamp'].strftime('%H:%M:%S'),
+            "umidade": nova_leitura['umidade'],
+            "temperatura": nova_leitura['temperatura'],
+            "chuva": nova_leitura['chuva']
+        }
         return jsonify(leitura_formatada)
-    except Exception: print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
+    except Exception:
+        print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}")
+        return jsonify({"error": "Erro interno ao gerar novo dado"}), 500
 
 @app.route('/api/meses_disponiveis')
 def api_meses_disponiveis():
     try:
-        if dados_excel.empty: return jsonify([])
-        meses = dados_excel['timestamp'].dt.strftime('%Y-%m').unique().tolist()
-        meses.sort(reverse=True)
-        return jsonify(meses)
-    except Exception: print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
-
-# --- INICIALIZAÇÃO ---
-carregar_dados_do_excel()
-
+        with engine.connect() as connection:
+            ensure_table_exists(connection)
+            query = text("SELECT DISTINCT to_char(timestamp, 'YYYY-MM') as mes FROM leituras ORDER BY mes DESC")
+            result = connection.execute(query).mappings().all()
+            meses = [row['mes'] for row in result]
+            return jsonify(meses)
+    except Exception:
+        print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
