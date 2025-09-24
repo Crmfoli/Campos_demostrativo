@@ -42,7 +42,6 @@
         <img src="{{ url_for('static', filename='images/logo.png') }}" alt="Logo da Empresa" class="logo-header">
         <h1>Localização de Sensores</h1>
     </div>
-
     <div id="map">
         <div id="logo-tamoios-mapa">
             <img src="{{ url_for('static', filename='images/tamoios.png') }}" alt="Logo Tamoios">
@@ -55,43 +54,16 @@
 
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
-        // =======================================================================
-        // ALTERAÇÃO PRECISA: Novo centro e zoom para focar na área de interesse.
-        // =======================================================================
-        var map = L.map('map').setView([-23.591522, -45.448815], 15); // Zoom aumentado para 15 para máximo detalhe
+        var map = L.map('map').setView([-23.53, -45.575], 15);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a>' }).addTo(map);
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
-            attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a>'
-        }).addTo(map);
-
-        // =======================================================================
-        // ALTERAÇÃO PRECISA: Novas coordenadas exatas dos sensores.
-        // =======================================================================
         const sensores = [
-            {
-                id: 'SN-A7B4',
-                nome: 'Sensor KM 81 ',
-                coords: [-23.588845, -45.455631]
-            },
-            {
-                id: 'SN-C3D9',
-                nome: 'Sensor KM 74 ',
-                coords: [-23.587186, -45.446157]
-            },
-            {
-                id: 'SN-F8G2',
-                nome: 'Sensor KM 68 ',
-                coords: [-23.595088, -45.444188]
-            },
-            {
-                id: 'SN-K1L5',
-                nome: 'Sensor KM 62 ',
-                coords: [-23.602199, -45.448753]
-            }
+            { id: 'SN-A7B4', nome: 'Sensor KM 81 (Planalto)', coords: [-23.5255, -45.5785] },
+            { id: 'SN-C3D9', nome: 'Sensor KM 74 (Trecho de Serra)', coords: [-23.5311, -45.5695] },
+            { id: 'SN-F8G2', nome: 'Sensor KM 68 (Trecho de Serra)', coords: [-23.5393, -45.5620] },
+            { id: 'SN-K1L5', nome: 'Sensor KM 62 (Próximo ao Litoral)', coords: [-23.5480, -45.5535] }
         ];
 
-        // O restante do script continua o mesmo
         sensores.forEach(sensor => {
             var marker = L.marker(sensor.coords).addTo(map);
             var popupContent = `<div style="text-align: center;"><h4>${sensor.nome}</h4><p style="margin: 5px 0;">ID: ${sensor.id}</p><a href="/dashboard?device_id=${sensor.id}" class="btn-acessar">Ver Dados</a></div>`;
@@ -118,6 +90,7 @@
         async function atualizarLegendaStatus() {
             try {
                 const response = await fetch('/api/status_sensores');
+                if (!response.ok) throw new Error('Falha na API de status');
                 const statusAtual = await response.json();
                 const risco = analisarRisco(statusAtual);
                 sensores.forEach(sensor => {
@@ -134,9 +107,3 @@
     </script>
 </body>
 </html>
-
-
-
-
-
-
