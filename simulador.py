@@ -1,52 +1,53 @@
 # -*- coding: utf-8 -*-
-# VERSÃO 17.3 - Garante que a API de Status está presente e funcional
-import os, random, traceback
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+# VERSÃO 18.1 - Lendo colunas customizadas do arquivo Excel.
+import traceback
 from flask import Flask, jsonify, render_template, request
 import pandas as pd
-from sqlalchemy import create_engine, text, inspect
 
 app = Flask(__name__)
 
-TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
-DATABASE_URL = os.environ.get("DATABASE_URL")
-engine = create_engine(DATABASE_URL)
+# Variável para armazenar os dados do Excel em memória e evitar releituras constantes do arquivo.
+df_cache = None
 
-def gerar_leitura_baseada_no_tempo(timestamp):
-    minuto = timestamp.minute; umidade, temperatura, chuva = 0, 0, 0
-    if 0 <= minuto < 20: umidade = 35.0 - (minuto * 0.75); temperatura = 25.0 + (minuto * 0.2); chuva = 0.0
-    elif 20 <= minuto < 40: umidade = 20.0 + ((minuto - 20) * 2.0); temperatura = 29.0 - ((minuto - 20) * 0.3); chuva = random.uniform(5.0, 25.0)
-    else: umidade = 60.0 - ((minuto - 40) * 1.0); temperatura = 23.0 + ((minuto - 40) * 0.1); chuva = 0.0
-    umidade += random.uniform(-1.5, 1.5); temperatura += random.uniform(-1.0, 1.0)
-    return { "timestamp": timestamp, "umidade": round(max(10, min(70, umidade)), 2), "temperatura": round(temperatura, 2), "chuva": round(chuva, 2) }
+def ler_dados_do_excel():
+    """
+    Esta função lê o arquivo 'dados_sensores_final.xlsx', renomeia as colunas
+    para o padrão do programa e o armazena em cache.
+    """
+    global df_cache
+    if df_cache is None:
+        try:
+            print("Lendo o arquivo 'dados_sensores_final.xlsx'...")
+            
+            # Lê o arquivo. É importante que a coluna 'Data e Hora' seja lida como data.
+            df = pd.read_excel('dados_sensores_final.xlsx', parse_dates=['Data e Hora'])
+            
+            # --- INÍCIO DA NOVA ALTERAÇÃO ---
+            # Renomeia as colunas do seu arquivo para os nomes que o programa espera.
+            df.rename(columns={
+                'Data e Hora': 'timestamp',
+                'Umidade do Solo': 'umidade',
+                'Temperatura': 'temperatura',
+                'Precipitação': 'chuva'
+            }, inplace=True)
+            # --- FIM DA NOVA ALTERAÇÃO ---
+            
+            # Garante que os dados estejam ordenados pela data/hora.
+            df.sort_values(by='timestamp', inplace=True)
+            
+            df_cache = df
+            print("Arquivo lido, colunas renomeadas e dados armazenados em cache com sucesso.")
 
-def create_initial_data_file(connection):
-    try:
-        print("Criando tabela com dados históricos..."); hora_atual = datetime.now(TZ_BRASILIA); total_horas = 30 * 24; dados = []
-        for i in range(total_horas):
-            leitura = gerar_leitura_baseada_no_tempo(hora_atual - timedelta(hours=i))
-            dados.append(f"('{leitura['timestamp']}', {leitura['umidade']}, {leitura['temperatura']}, {leitura['chuva']})")
-        dados.reverse(); values_sql = ", ".join(dados)
-        connection.execute(text("""CREATE TABLE leituras (id SERIAL PRIMARY KEY, timestamp TIMESTAMPTZ NOT NULL, umidade FLOAT NOT NULL, temperatura FLOAT NOT NULL, chuva FLOAT NOT NULL);"""))
-        connection.execute(text(f"INSERT INTO leituras (timestamp, umidade, temperatura, chuva) VALUES {values_sql};")); connection.commit()
-    except Exception: print(f"FALHA CRÍTICA AO CRIAR TABELA: {traceback.format_exc()}")
+        except FileNotFoundError:
+            print("ERRO CRÍTICO: O arquivo 'dados_sensores_final.xlsx' não foi encontrado!")
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"ERRO CRÍTICO ao ler o arquivo Excel: {traceback.format_exc()}")
+            print("VERIFIQUE SE OS NOMES DAS COLUNAS NO ARQUIVO EXCEL ('Data e Hora', 'Umidade do Solo', etc.) ESTÃO EXATAMENTE IGUAIS AOS DO CÓDIGO.")
+            return pd.DataFrame()
+    
+    return df_cache
 
-def ensure_table_exists(connection):
-    inspector = inspect(connection)
-    if not inspector.has_table('leituras'): create_initial_data_file(connection)
-
-def ler_dados_do_db():
-    try:
-        with engine.connect() as connection:
-            ensure_table_exists(connection)
-            return pd.read_sql_table('leituras', connection, parse_dates=['timestamp'])
-    except Exception: print(f"Erro ao ler do banco de dados: {traceback.format_exc()}"); return pd.DataFrame()
-
-def salvar_nova_leitura_no_db(leitura):
-    with engine.connect() as connection:
-        ensure_table_exists(connection)
-        query = text("INSERT INTO leituras (timestamp, umidade, temperatura, chuva) VALUES (:ts, :u, :t, :c)"); connection.execute(query, {"ts": leitura['timestamp'], "u": leitura['umidade'], "t": leitura['temperatura'], "c": leitura['chuva']}); connection.commit()
 
 @app.route('/')
 def pagina_de_acesso(): return render_template('index.html')
@@ -62,39 +63,70 @@ def pagina_dashboard():
 @app.route('/api/dados')
 def api_dados():
     try:
-        df = ler_dados_do_db();
+        df = ler_dados_do_excel()
         if df.empty: return jsonify([])
+        
         mes_selecionado = request.args.get('month')
-        if mes_selecionado: df_filtrado = df[df['timestamp'].dt.strftime('%Y-%m') == mes_selecionado]
-        else: df_filtrado = df.tail(30)
-        dados_formatados = df_filtrado.apply(lambda row: { "timestamp_completo": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": row['timestamp'].astimezone(TZ_BRASILIA).strftime('%H:%M:%S'), "umidade": row['umidade'], "temperatura": row['temperatura'], "chuva": row['chuva'] }, axis=1).tolist()
+        if mes_selecionado:
+            df_filtrado = df[df['timestamp'].dt.strftime('%Y-%m') == mes_selecionado]
+        else:
+            df_filtrado = df.tail(30)
+            
+        dados_formatados = df_filtrado.apply(lambda row: {
+            "timestamp_completo": row['timestamp'].strftime('%d/%m/%Y %H:%M:%S'),
+            "timestamp_grafico": row['timestamp'].strftime('%H:%M:%S'),
+            "umidade": row['umidade'],
+            "temperatura": row['temperatura'],
+            "chuva": row['chuva']
+        }, axis=1).tolist()
         return jsonify(dados_formatados)
-    except Exception: print(f"Erro na rota /api/dados: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
+    except Exception:
+        print(f"Erro na rota /api/dados: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 
 @app.route('/api/dados_atuais')
 def api_dados_atuais():
     try:
-        nova_leitura = gerar_leitura_baseada_no_tempo(datetime.now(TZ_BRASILIA))
-        salvar_nova_leitura_no_db(nova_leitura)
-        leitura_formatada = { "timestamp_completo": nova_leitura['timestamp'].strftime('%d/%m/%Y %H:%M:%S'), "timestamp_grafico": nova_leitura['timestamp'].strftime('%H:%M:%S'), "umidade": nova_leitura['umidade'], "temperatura": nova_leitura['temperatura'], "chuva": nova_leitura['chuva'] }
+        df = ler_dados_do_excel()
+        if df.empty:
+            return jsonify({"error": "Arquivo de dados não encontrado ou vazio"}), 404
+        
+        nova_leitura = df.iloc[-1]
+        
+        leitura_formatada = {
+            "timestamp_completo": nova_leitura['timestamp'].strftime('%d/%m/%Y %H:%M:%S'),
+            "timestamp_grafico": nova_leitura['timestamp'].strftime('%H:%M:%S'),
+            "umidade": nova_leitura['umidade'],
+            "temperatura": nova_leitura['temperatura'],
+            "chuva": nova_leitura['chuva']
+        }
         return jsonify(leitura_formatada)
-    except Exception: print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
+    except Exception:
+        print(f"Erro na rota /api/dados_atuais: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 
 @app.route('/api/meses_disponiveis')
 def api_meses_disponiveis():
     try:
-        df = ler_dados_do_db()
+        df = ler_dados_do_excel()
         if df.empty: return jsonify([])
+        
         meses = df['timestamp'].dt.strftime('%Y-%m').unique().tolist()
         meses.reverse()
         return jsonify(meses)
-    except Exception: print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
+    except Exception:
+        print(f"Erro na rota /api/meses_disponiveis: {traceback.format_exc()}"); return jsonify({"error": "Erro interno"}), 500
 
 @app.route('/api/status_sensores')
 def api_status_sensores():
     try:
-        leitura_atual = gerar_leitura_baseada_no_tempo(datetime.now(TZ_BRASILIA))
-        status = { "umidade": leitura_atual['umidade'], "chuva": leitura_atual['chuva'] }
+        df = ler_dados_do_excel()
+        if df.empty:
+            return jsonify({"error": "Arquivo de dados não encontrado ou vazio"}), 404
+        
+        leitura_atual = df.iloc[-1]
+        status = {
+            "umidade": leitura_atual['umidade'],
+            "chuva": leitura_atual['chuva']
+        }
         return jsonify(status)
     except Exception:
         print(f"Erro na rota /api/status_sensores: {traceback.format_exc()}"); return jsonify({"error": "Erro interno ao buscar status"}), 500
