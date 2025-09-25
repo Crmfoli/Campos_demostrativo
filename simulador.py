@@ -1,26 +1,24 @@
 # -*- coding: utf-8 -*-
-# VERSÃO 19.3 - MODO DE DIAGNÓSTICO COM CAMINHO ABSOLUTO CORRIGIDO PARA RENDER
+# VERSÃO 19.5 - Diagnóstico Final com o nome de arquivo correto (minúsculas)
 import traceback
 from flask import Flask, jsonify, render_template, request
 import pandas as pd
-import os # Biblioteca para lidar com o sistema de arquivos
+import os
 
 app = Flask(__name__)
 
-# --- ALTERAÇÃO AQUI: CONSTRUINDO O CAMINHO DA FORMA CORRETA PARA FLASK ---
-# app.root_path é uma variável do Flask que nos dá o caminho para a pasta da aplicação.
-# Esta é a maneira mais confiável de encontrar arquivos em ambientes de deploy como o Render.
+# --- O nome do arquivo CORRETO (tudo minúsculo), como está na sua última imagem ---
 CAMINHO_DO_ARQUIVO = os.path.join(app.root_path, 'dados_sensores_final.xlsx')
 
 
-# --- FUNÇÃO DE DIAGNÓSTICO ATUALIZADA ---
+# --- FUNÇÃO DE DIAGNÓSTICO ---
 def ler_dados_do_excel():
     try:
         print("\n" + "="*50)
         print("--- INICIANDO DIAGNÓSTICO DO ARQUIVO EXCEL ---")
         print("="*50)
         
-        print(f"\n[INFO] Procurando pelo arquivo no caminho completo: {CAMINHO_DO_ARQUIVO}\n")
+        print(f"\n[INFO] Procurando pelo arquivo no caminho correto: {CAMINHO_DO_ARQUIVO}\n")
         
         # Lê a planilha usando a constante do caminho.
         df = pd.read_excel(CAMINHO_DO_ARQUIVO, header=None)
@@ -43,12 +41,11 @@ def ler_dados_do_excel():
 
 
     except FileNotFoundError:
-        print(f"ERRO CRÍTICO: O arquivo '{CAMINHO_DO_ARQUIVO}' NÃO FOI ENCONTRADO!")
-        print("Por favor, verifique no GitHub se o nome do arquivo está escrito exatamente igual e no diretório principal.")
+        print(f"ERRO CRÍTICO: O arquivo '{CAMINHO_DO_ARQUIVO}' NÃO FOI ENCONTRADO! Mesmo com o nome e caminho corrigidos.")
+        print("Por favor, verifique se o último push para o GitHub foi concluído com sucesso.")
     except Exception as e:
         print(f"ERRO ao tentar diagnosticar o arquivo: {traceback.format_exc()}")
     
-    # Retorna um DataFrame vazio para que o servidor web não quebre.
     return pd.DataFrame()
 
 
