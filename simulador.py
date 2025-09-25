@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# VERSÃO 18.1 - Lendo colunas customizadas do arquivo Excel.
+# VERSÃO 18.4 - Clarificando a renomeação de colunas e melhorando erros.
 import traceback
 from flask import Flask, jsonify, render_template, request
 import pandas as pd
@@ -11,39 +11,47 @@ df_cache = None
 
 def ler_dados_do_excel():
     """
-    Esta função lê o arquivo 'dados_sensores_final.xlsx', renomeia as colunas
-    para o padrão do programa e o armazena em cache.
+    Esta função lê o arquivo, combina data/hora, e renomeia as colunas da planilha
+    para o padrão do programa, armazenando o resultado em cache.
     """
     global df_cache
     if df_cache is None:
         try:
             print("Lendo o arquivo 'dados_sensores_final.xlsx'...")
             
-            # Lê o arquivo. É importante que a coluna 'Data e Hora' seja lida como data.
-            df = pd.read_excel('dados_sensores_final.xlsx', parse_dates=['Data e Hora'])
-            
-            # --- INÍCIO DA NOVA ALTERAÇÃO ---
-            # Renomeia as colunas do seu arquivo para os nomes que o programa espera.
+            df = pd.read_excel('dados_sensores_final.xlsx')
+
+            df['timestamp'] = pd.to_datetime(df['Data'].astype(str) + ' ' + df['Hora'].astype(str), errors='coerce')
+            df.dropna(subset=['timestamp'], inplace=True)
+
+            # --- LÓGICA DE RENOMEAÇÃO EXPLICADA ---
+            # O código abaixo é um "DE-PARA". Ele lê os nomes exatos da sua planilha (à esquerda)
+            # e os renomeia para o padrão que o programa usa (à direita).
+            # Isso garante total compatibilidade com a sua planilha da imagem.
             df.rename(columns={
-                'Data e Hora': 'timestamp',
-                'Umidade do Solo': 'umidade',
-                'Temperatura': 'temperatura',
-                'Precipitação': 'chuva'
+                'Umidade': 'umidade',       # DE: 'Umidade' (da planilha) PARA: 'umidade' (interno do programa)
+                'Temperatura': 'temperatura', # DE: 'Temperatura' (da planilha) PARA: 'temperatura' (interno)
+                'Chuva': 'chuva'          # DE: 'Chuva' (da planilha) PARA: 'chuva' (interno)
             }, inplace=True)
-            # --- FIM DA NOVA ALTERAÇÃO ---
             
-            # Garante que os dados estejam ordenados pela data/hora.
+            # Garante que o DataFrame final tenha apenas as colunas que o programa precisa.
+            colunas_finais = ['timestamp', 'umidade', 'temperatura', 'chuva']
+            df = df[colunas_finais]
+
             df.sort_values(by='timestamp', inplace=True)
-            
             df_cache = df
-            print("Arquivo lido, colunas renomeadas e dados armazenados em cache com sucesso.")
+            print("Arquivo lido, colunas processadas e dados armazenados em cache com sucesso.")
 
         except FileNotFoundError:
             print("ERRO CRÍTICO: O arquivo 'dados_sensores_final.xlsx' não foi encontrado!")
             return pd.DataFrame()
+        except KeyError as e:
+            print(f"ERRO DE COLUNA: A coluna {e} não foi encontrada no arquivo Excel.")
+            print("POR FAVOR, VERIFIQUE SE OS CABEÇALHOS NO SEU ARQUIVO SÃO EXATAMENTE: 'Data', 'Hora', 'Umidade', 'Temperatura', 'Chuva'")
+            print("A grafia, maiúsculas/minúsculas e espaços devem ser idênticos.")
+            return pd.DataFrame()
         except Exception as e:
             print(f"ERRO CRÍTICO ao ler o arquivo Excel: {traceback.format_exc()}")
-            print("VERIFIQUE SE OS NOMES DAS COLUNAS NO ARQUIVO EXCEL ('Data e Hora', 'Umidade do Solo', etc.) ESTÃO EXATAMENTE IGUAIS AOS DO CÓDIGO.")
             return pd.DataFrame()
     
     return df_cache
